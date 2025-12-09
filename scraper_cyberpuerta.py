@@ -245,12 +245,24 @@ INPUT_URLS = [
 
 BASE_SEARCH = "https://www.cyberpuerta.mx/index.php?cl=search&searchparam="
 
-# --- Control de tiempos ---
-INITIAL_WAIT_RANGE = (50.0, 80.0)   # espera mínima obligatoria ANTES de la búsqueda (primer intento) por SKU
-BETWEEN_REQUESTS    = (4.0, 7.0)    # espera entre búsqueda y detalle
-MAX_RETRIES         = 7             # reintentos por petición (para 429/403/5xx)
-BACKOFF_BASE        = 4.0           # base para backoff exponencial en 429/403
-BACKOFF_CAP         = 90.0          # tope de cada backoff
+# Detectar si estamos corriendo dentro de GitHub Actions
+IS_GITHUB = os.environ.get("GITHUB_ACTIONS") == "true"
+
+if IS_GITHUB:
+    # Versión “rápida” para GitHub (≈ 5h30 si antes eran 8h)
+    INITIAL_WAIT_RANGE = (34.0, 55.0)   # antes 50–80
+    BETWEEN_REQUESTS    = (3.0, 5.0)    # antes 4–7
+    MAX_RETRIES         = 7            # mismo número de reintentos
+    BACKOFF_BASE        = 3.0          # antes 4
+    BACKOFF_CAP         = 62.0         # antes 90
+else:
+    # Versión original (lenta) para Colab / local
+    INITIAL_WAIT_RANGE = (50.0, 80.0)
+    BETWEEN_REQUESTS    = (4.0, 7.0)
+    MAX_RETRIES         = 7
+    BACKOFF_BASE        = 4.0
+    BACKOFF_CAP         = 90.0
+
 
 # Adaptador de espera según “salud” reciente (cuántos 429 hemos visto)
 ROLLING_WINDOW      = 6             # últimos N SKUs para medir ratio de 429
