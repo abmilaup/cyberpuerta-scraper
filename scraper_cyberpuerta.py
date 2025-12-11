@@ -34,10 +34,10 @@ import pandas as pd
 # ================================================================
 
 INPUT_CODES: List[str] = [
-KF432C16BB12AK2/32
-KF432C16BB12AK4/64
-KF432C16BB2AK4/64
-KF432C16RB12K2/32
+    # EJEMPLO (BORRA Y PON TUS CÓDIGOS):
+    # "KF560C36BBE2-16",
+    # "KF556C36BBE-16",
+    # ...
 ]
 
 # Si prefieres leer de un archivo, puedes opcionalmente
