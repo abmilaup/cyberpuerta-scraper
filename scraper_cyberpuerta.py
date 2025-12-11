@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Scraper Cyberpuerta - Versión pensada para GitHub Actions
+'''
+Scraper Cyberpuerta - Versión para GitHub Actions
 
+- Pegas tus SKUs en un bloque de texto (INPUT_CODES_RAW).
 - Usa requests + BeautifulSoup.
 - Maneja 429 con reintentos y backoff.
 - Intenta detectar:
@@ -12,7 +13,7 @@ Scraper Cyberpuerta - Versión pensada para GitHub Actions
 - Genera:
     * cyberpuerta_datos_paso1.csv / .xlsx
     * cyberpuerta_datos_pasofull.csv / .xlsx
-"""
+'''
 
 import time
 import random
@@ -29,29 +30,29 @@ from urllib3.util.retry import Retry
 import pandas as pd
 
 # ================================================================
-# 1) LISTA DE CÓDIGOS A BUSCAR
-#    *** RELLENA ESTA LISTA CON TUS CÓDIGOS ***
+# 1) AQUÍ PEGAS TUS SKUs (UNO POR LÍNEA)
+#    Solo edita este bloque de texto:
 # ================================================================
 
-INPUT_CODES: List[str] = [
-    # EJEMPLO (BORRA Y PON TUS CÓDIGOS):
-    # "KF560C36BBE2-16",
-    # "KF556C36BBE-16",
-    # ...
-]
+INPUT_CODES_RAW = """
 
-# Si prefieres leer de un archivo, puedes opcionalmente
-# leer un archivo "input_codes.txt" (un código por línea).
-def load_codes_from_file(path: str = "input_codes.txt") -> List[str]:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = [ln.strip() for ln in f if ln.strip()]
-        if lines:
-            print(f"📥 Se encontraron {len(lines)} códigos en {path}, se usarán esos en lugar de INPUT_CODES.")
-            return lines
-    except FileNotFoundError:
-        pass
-    return INPUT_CODES
+KF556C40BBA-16
+KF556C40BBA-32
+KF556C40BBAK2-32
+"""
+
+def get_input_codes() -> List[str]:
+    """
+    Convierte el bloque de texto anterior en una lista de SKUs.
+    - Ignora líneas vacías.
+    - Hace strip() a cada línea.
+    """
+    codes: List[str] = []
+    for line in INPUT_CODES_RAW.splitlines():
+        line = line.strip()
+        if line:
+            codes.append(line)
+    return codes
 
 
 # ================================================================
@@ -171,7 +172,7 @@ def detect_no_results_or_block(html: str) -> str:
         "no se han encontrado resultados",
         "no se encontraron productos",
         "no hay resultados para tu búsqueda",
-        "no hay productos que coincidan"
+        "no hay productos que coincidan",
     ]
     for phrase in no_results_phrases:
         if phrase in text:
@@ -183,7 +184,7 @@ def detect_no_results_or_block(html: str) -> str:
         "cloudflare",
         "nuestro sistema ha detectado tráfico inusual",
         "attention required",
-        "verificación de seguridad"
+        "verificación de seguridad",
     ]
     for phrase in blocked_phrases:
         if phrase in text:
@@ -248,14 +249,9 @@ def extract_first_money(text: str) -> Optional[Tuple[str, Optional[float]]]:
     precio_txt = "$ " + m.group(1).strip()
 
     # Limpiar para convertir a float:
-    # Asumimos formato mexicano: miles con coma o punto, decimales con punto o coma.
     num = m.group(1)
-    # Quitar espacios
     num = num.replace(" ", "")
-    # Quitar separador de miles (puntos o comas) dejando sólo el último separador decimal
-    # Estrategia sencilla: quitar todos los puntos y comas, menos el último.
-    # Mejor: reemplazar comas por nada y puntos por nada, y luego no poner decimales.
-    # Para no complicar, eliminamos cualquier separador y parseamos como entero:
+    # Eliminar todo lo que no sea dígito para quedarnos con un número entero
     limpio = re.sub(r"[^\d]", "", num)
     try:
         precio_num = float(limpio)
@@ -299,7 +295,6 @@ def parse_product_page(html: str) -> Tuple[Optional[str], Optional[str], Optiona
     if title_tag and title_tag.get_text(strip=True):
         titulo = title_tag.get_text(strip=True)
     else:
-        # fallback: <title>
         if soup.title and soup.title.get_text(strip=True):
             titulo = soup.title.get_text(strip=True)
         else:
@@ -319,9 +314,9 @@ def parse_product_page(html: str) -> Tuple[Optional[str], Optional[str], Optiona
 # ================================================================
 
 def main() -> None:
-    codes = load_codes_from_file()
+    codes = get_input_codes()
     if not codes:
-        print("⚠️ No hay códigos en INPUT_CODES ni en input_codes.txt. Llena al menos uno.")
+        print("⚠️ No hay códigos en INPUT_CODES_RAW. Asegúrate de pegar al menos uno.")
         return
 
     print(f"📥 Usando {len(codes)} códigos para buscar en Cyberpuerta.\n")
@@ -390,7 +385,6 @@ def main() -> None:
                     status = "HTML de búsqueda sin patrón de producto (posible layout nuevo o bloqueo)"
 
                 print(f"[{idx}/{len(codes)}] {code_str} -> {status}")
-                # Guardar HTML para depurar
                 save_debug_html("search", code_str, html_search, idx)
 
         # Si no hay URL de producto, guardamos fila sin datos de producto
@@ -408,7 +402,6 @@ def main() -> None:
                 "STATUS": status,
             }
             rows.append(row)
-            # Pasamos al siguiente código
             continue
 
         # 2) PÁGINA DE PRODUCTO
