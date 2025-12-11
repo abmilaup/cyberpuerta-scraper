@@ -1,42 +1,64 @@
-name: Ejecutar scraper Cyberpuerta diario
+name: Scraper diario Cyberpuerta
 
 on:
   schedule:
-    # 02:00 UTC ≈ 20:00 (8 pm) Ciudad de México
-    - cron: "0 2 * * *"
-  # Para poder correrlo a mano cuando quieras
+    # Ajusta la hora que quieras en UTC
+    # Este ejemplo corre todos los días a las 02:00 UTC
+    - cron: '0 2 * * *'
   workflow_dispatch:
 
 jobs:
-  run-scraper:
+  scrape:
     runs-on: ubuntu-latest
-
-    env:
-      EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
-      EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-      EMAIL_TO: ${{ secrets.EMAIL_TO }}
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run scraper
+      - name: Run Cyberpuerta scraper
+        env:
+          # Señal para que el script sepa que está en GitHub
+          GITHUB_ACTIONS: "true"
+
+          # Límite máximo de tiempo TOTAL para el script (en segundos).
+          # 21000 s ≈ 5.83 h (5h50m), para no chocar con el límite de 6h.
+          CYBERPUERTA_MAX_RUNTIME: "21000"
+
+          # Número máximo de pasadas (loop) sobre los pendientes
+          CYBERPUERTA_MAX_PASSES: "3"
+
+          # Minutos de colchón antes del límite de tiempo en cada pasada (600 s = 10 min)
+          CYBERPUERTA_PASS_GUARD: "600"
+
+          # Si quieres que lea códigos desde un archivo de texto en el repo,
+          # por ejemplo 'codigos_cyberpuerta.txt':
+          # CYBERPUERTA_CODES_FILE: "codigos_cyberpuerta.txt"
+
+          # Envío de email (opcional). Configurados como secrets en GitHub.
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: |
           python scraper_cyberpuerta.py
 
-      - name: Upload artifacts (CSV y XLSX)
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cyberpuerta_datos
+          name: resultados-cyberpuerta
           path: |
-            cyberpuerta_datos.csv
-            cyberpuerta_datos.xlsx
+            cyberpuerta_datos_paso*.csv
+            cyberpuerta_datos_paso*.xlsx
+            cyberpuerta_pending_codes_paso*.txt
+            cyberpuerta_datos_paso_full.csv
+            cyberpuerta_datos_paso_full.xlsx
+          if-no-files-found: warn
