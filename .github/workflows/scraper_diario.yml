@@ -28,9 +28,9 @@ jobs:
         env:
           # Tiempo máximo POR LOOP (en horas)
           # Para producción: 5.667 ≈ 5h40m
-          CYBERPUERTA_MAX_HOURS: "5.667"
+          CYBERPUERTA_MAX_HOURS: "0.07"
           # Minutos de colchón para cortar ANTES del límite de cada loop
-          CYBERPUERTA_GUARD_MINUTES: "10"
+          CYBERPUERTA_GUARD_MINUTES: "1"
 
           # Envío de email (usa tus secrets de GitHub)
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
