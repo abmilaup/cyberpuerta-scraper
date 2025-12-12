@@ -15,7 +15,7 @@ from email.message import EmailMessage
 # ================= PARÁMETROS (ajústalos si quieres) =================
 
 # ⏲️ LÍMITE GLOBAL DE TIEMPO POR EJECUCIÓN: 5h 40min
-TIME_LIMIT_SECONDS = 5 * 3600 + 40 * 60  # 20400 segundos
+TIME_LIMIT_SECONDS = 300  # 20400 segundos
 
 # Archivo donde se guardan los códigos pendientes entre ejecuciones
 PENDING_CODES_FILE = "cyberpuerta_pending_codes.txt"
