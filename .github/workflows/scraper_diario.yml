@@ -31,12 +31,11 @@ jobs:
         env:
           LOOP_INDEX: "1"
 
-          # Tiempo máximo POR LOOP (en horas)
-          CYBERPUERTA_MAX_HOURS: "0.07"        # ~4 minutos para pruebas
-          CYBERPUERTA_GUARD_MINUTES: "1"       # 1 min de colchón
+          CYBERPUERTA_MAX_HOURS: "0.07"
+          CYBERPUERTA_GUARD_MINUTES: "1"
 
-          # Para producción, luego lo cambias a:
-          # CYBERPUERTA_MAX_HOURS: "5.667"     # ~5h40
+          # Para producción:
+          # CYBERPUERTA_MAX_HOURS: "5.667"
           # CYBERPUERTA_GUARD_MINUTES: "10"
 
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
