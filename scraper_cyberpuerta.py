@@ -1,5 +1,9 @@
 import os
-import re, time, random, sys, statistics
+import re
+import time
+import random
+import sys
+import statistics
 from datetime import datetime
 from urllib.parse import urljoin, quote_plus
 
@@ -13,13 +17,7 @@ import ssl
 from email.message import EmailMessage
 
 # ================= PARÁMETROS (ajústalos si quieres) =================
-
-# ⏲️ LÍMITE GLOBAL DE TIEMPO POR EJECUCIÓN: 5h 40min
-TIME_LIMIT_SECONDS = 300  # 20400 segundos
-
-# Archivo donde se guardan los códigos pendientes entre ejecuciones
-PENDING_CODES_FILE = "cyberpuerta_pending_codes.txt"
-
+# Aquí pegas tus SKUs, uno por línea
 INPUT_CODES = """
 
 SNV3S/1000G
@@ -229,18 +227,17 @@ HDTCA40XW3CA
 SDCS2/64GB
 HDWG51CXZSTA
 
-
 """.strip()
 
+# Si quieres URLs directas, las pones aquí
 INPUT_URLS = [
-    # Si quieres, puedes poner URLs directas aquí
     # "https://www.cyberpuerta.mx/index.php?cl=search&searchparam=AUSDH16GUICL10-RA1",
 ]
 
 BASE_SEARCH = "https://www.cyberpuerta.mx/index.php?cl=search&searchparam="
 
-# --- Control de tiempos ---
-INITIAL_WAIT_RANGE = (50.0, 80.0)   # espera mínima obligatoria ANTES de la búsqueda (primer intento) por SKU
+# --- Control de tiempos (por SKU, como en tu script de Colab) ---
+INITIAL_WAIT_RANGE = (50.0, 80.0)   # espera mínima obligatoria ANTES de la búsqueda por SKU
 BETWEEN_REQUESTS    = (4.0, 7.0)    # espera entre búsqueda y detalle
 MAX_RETRIES         = 7             # reintentos por petición (para 429/403/5xx)
 BACKOFF_BASE        = 4.0           # base para backoff exponencial en 429/403
@@ -248,14 +245,27 @@ BACKOFF_CAP         = 90.0          # tope de cada backoff
 
 # Adaptador de espera según “salud” reciente (cuántos 429 hemos visto)
 ROLLING_WINDOW      = 6             # últimos N SKUs para medir ratio de 429
-ALPHA_SENSITIVITY   = 1.2           # cuánto aumentar/bajar la espera inicial por ratio de 429 (0..1)
-#   - Si ratio_429 = 0.0 -> multiplicador ≈ 1.0
-#   - Si ratio_429 = 1.0 -> multiplicador ≈ 1.0 + ALPHA_SENSITIVITY
+ALPHA_SENSITIVITY   = 1.2           # cuánto aumentar/bajar la espera inicial por ratio de 429
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "Chrome/126.0.0.0 Safari/537.36"
 )
+
+# ========= CONFIG GLOBAL DE TIEMPO / LOOPS PARA GITHUB ==============
+# Máximo de horas que puede durar UNA ejecución de GitHub
+# 5.667 ≈ 5 horas 40 minutos
+MAX_TOTAL_HOURS = float(os.environ.get("CYBERPUERTA_MAX_HOURS", "0.07"))
+
+# Minutos de colchón antes del límite (para terminar bien, generar Excel y pendientes)
+TIME_GUARD_MINUTES = float(os.environ.get("CYBERPUERTA_GUARD_MINUTES", "10"))
+
+# Índice de loop (1, 2 o 3) – lo pones en el workflow de GitHub
+LOOP_INDEX = int(os.environ.get("CYBERPUERTA_LOOP_INDEX", "1"))
+if LOOP_INDEX < 1:
+    LOOP_INDEX = 1
+if LOOP_INDEX > 3:
+    LOOP_INDEX = 3
 
 # ================== Sesión HTTP con retries básicos (5xx) ==================
 session = requests.Session()
@@ -293,10 +303,10 @@ def to_number(txt):
     if not txt:
         return None
     t = (
-        txt.replace("$","")
-          .replace("MXN","")
-          .replace("mxn","")
-          .replace("\xa0"," ")
+        txt.replace("$", "")
+          .replace("MXN", "")
+          .replace("mxn", "")
+          .replace("\xa0", " ")
           .strip()
     )
     t = re.sub(r"[^\d\.,]", "", t).replace(",", "")
@@ -387,12 +397,10 @@ recent_429 = []  # lista de bool (True si el SKU tuvo al menos un 429 en su cicl
 def current_429_ratio():
     if not recent_429:
         return 0.0
-    # proporción de SKUs recientes que sufrieron 429
     return sum(1 for x in recent_429 if x) / len(recent_429)
 
 
 def planned_initial_wait():
-    # base aleatoria mínima
     base = jitter(*INITIAL_WAIT_RANGE)  # siempre >= 50s
     ratio = current_429_ratio()         # 0..1
     multiplier = 1.0 + ALPHA_SENSITIVITY * ratio
@@ -429,19 +437,46 @@ def get_with_backoff(url, allow_redirects=True, timeout=30, mark_429_flag=None):
 
 
 # ================ Helpers de salida en consola (TAB para Excel) ================
-COLUMNS = ["TIMESTAMP","SKU","URL_BUSQUEDA","URL_PRODUCTO","TITULO","PRECIO_TEXTO","PRECIO_NUM","STOCK_TEXTO","STOCK_NUM","STATUS"]
+COLUMNS = ["TIMESTAMP", "SKU", "URL_BUSQUEDA", "URL_PRODUCTO", "TITULO",
+           "PRECIO_TEXTO", "PRECIO_NUM", "STOCK_TEXTO", "STOCK_NUM", "STATUS"]
+
 
 def row_to_tsv(row: dict) -> str:
     def fmt(x):
         if x is None:
             return ""
         s = str(x)
-        return s.replace("\t"," ").replace("\r"," ").replace("\n"," ").strip()
-    return "\t".join(fmt(row.get(col,"")) for col in COLUMNS)
+        return s.replace("\t", " ").replace("\r", " ").replace("\n", " ").strip()
+    return "\t".join(fmt(row.get(col, "")) for col in COLUMNS)
+
 
 def print_header_once():
     print("\t".join(COLUMNS))
     sys.stdout.flush()
+
+
+# ================= Carga de códigos por LOOP =======================
+def load_codes_for_loop(loop_index: int):
+    """
+    LOOP 1: lee de INPUT_CODES (embebido o desde archivo si quieres extender)
+    LOOP 2: lee de 'cyberpuerta_pending_codes_loop1.txt'
+    LOOP 3: lee de 'cyberpuerta_pending_codes_loop2.txt'
+    """
+    if loop_index == 1:
+        codes = [ln.strip() for ln in INPUT_CODES.splitlines() if ln.strip()]
+        print(f"📥 Cargando {len(codes)} códigos desde INPUT_CODES embebido (loop 1).")
+        return codes
+
+    prev = loop_index - 1
+    pending_file = f"cyberpuerta_pending_codes_loop{prev}.txt"
+    if os.path.isfile(pending_file):
+        with open(pending_file, encoding="utf-8") as f:
+            codes = [ln.strip() for ln in f if ln.strip()]
+        print(f"📥 Cargando {len(codes)} códigos pendientes desde '{pending_file}' (loop {loop_index}).")
+        return codes
+    else:
+        print(f"ℹ️ No encontré '{pending_file}'. No hay códigos pendientes para loop {loop_index}.")
+        return []
 
 
 # ========================= Flujo por código / URL =========================
@@ -451,7 +486,11 @@ def process_code(code):
     url_search = BASE_SEARCH + quote_plus(code) + f"&_ts={int(time.time()*1000)}"
     url_prod = ""
     status = "OK"
-    title = ""; p_txt = ""; p_num = ""; s_txt = ""; s_num = ""
+    title = ""
+    p_txt = ""
+    p_num = ""
+    s_txt = ""
+    s_num = ""
 
     saw_429 = [False]  # se pasa por referencia
 
@@ -521,7 +560,11 @@ def process_url(url):
     url_search = url
     url_prod = ""
     status = "OK"
-    title = ""; p_txt = ""; p_num = ""; s_txt = ""; s_num = ""
+    title = ""
+    p_txt = ""
+    p_num = ""
+    s_txt = ""
+    s_num = ""
     saw_429 = [False]
 
     initial_wait = planned_initial_wait()
@@ -571,43 +614,36 @@ def process_url(url):
 
 
 # =============================== Main ===============================
-def main():
-    # ⏲️ Inicio de la ejecución (para controlar las 5h40)
-    start_time = time.time()
-
-    # 1) Leer códigos: primero intentamos pendientes, si no, usamos INPUT_CODES
-    codes = []
-    if os.path.isfile(PENDING_CODES_FILE):
-        with open(PENDING_CODES_FILE, "r", encoding="utf-8") as f:
-            codes = [ln.strip() for ln in f if ln.strip()]
-        if codes:
-            print(f"📥 Cargando {len(codes)} códigos pendientes desde '{PENDING_CODES_FILE}'.")
-        else:
-            print(f"⚠️ '{PENDING_CODES_FILE}' está vacío, se usarán INPUT_CODES.")
-    if not codes:
-        codes = [ln.strip() for ln in INPUT_CODES.splitlines() if ln.strip()]
-        print(f"📥 Cargando {len(codes)} códigos desde INPUT_CODES embebido.")
-
-    urls  = [u.strip() for u in INPUT_URLS if u.strip()]
+def main(loop_index: int = 1):
+    codes = load_codes_for_loop(loop_index)
+    urls = [u.strip() for u in INPUT_URLS if u.strip()]
     items = [("code", c) for c in codes] + [("url", u) for u in urls]
 
     results = []
-    pending_codes = []
     total = len(items)
-    print(f"Procesando {total} ítems…\n")
-    print("\t".join(COLUMNS))
-    sys.stdout.flush()
+    print(f"👉 LOOP {loop_index} – Procesando {total} ítems…\n")
+    print_header_once()
+
+    start_time = time.time()
+    limit_seconds = MAX_TOTAL_HOURS * 3600.0 if MAX_TOTAL_HOURS > 0 else None
+    guard_seconds = TIME_GUARD_MINUTES * 60.0
+
+    pending_items = []
+    stopped_by_time = False
 
     for i, (kind, payload) in enumerate(items, 1):
-        # ⏲️ Checar límite de tiempo ANTES de procesar este ítem
-        elapsed = time.time() - start_time
-        if elapsed >= TIME_LIMIT_SECONDS:
-            print(f"\n⏹️ Se alcanzó el límite de tiempo de {TIME_LIMIT_SECONDS/3600:.2f} horas.")
-            print(f"   Se detiene en el ítem {i}/{total}. Lo que falta se guardará como pendientes.")
-            # Guardar los restantes como pendientes
-            remaining = items[i-1:]
-            pending_codes = [p for (k, p) in remaining if k == "code"]
-            break
+        # Checar límite de tiempo ANTES de procesar el siguiente ítem
+        if limit_seconds is not None:
+            elapsed = time.time() - start_time
+            if elapsed >= max(0.0, limit_seconds - guard_seconds):
+                horas_usadas = elapsed / 3600.0
+                print(
+                    f"⏹️ Se alcanzó el límite de tiempo de {MAX_TOTAL_HOURS:.2f} horas.\n"
+                    f"   Se detiene en el ítem {i}/{total}. Lo que falta se guardará como pendientes."
+                )
+                pending_items = items[i-1:]  # desde el actual hasta el final
+                stopped_by_time = True
+                break
 
         try:
             if kind == "code":
@@ -634,24 +670,19 @@ def main():
             print(row_to_tsv(row))
             sys.stdout.flush()
 
-    # Guardar pendientes (si hay)
-    if pending_codes:
-        with open(PENDING_CODES_FILE, "w", encoding="utf-8") as f:
-            for code in pending_codes:
-                f.write(code + "\n")
-        print(f"\n⚠️ Quedaron {len(pending_codes)} códigos pendientes.")
-        print(f"   Se guardaron en '{PENDING_CODES_FILE}' para la siguiente ejecución.")
-    else:
-        # Si ya no hay pendientes y el archivo existe, lo borramos
-        if os.path.isfile(PENDING_CODES_FILE):
-            os.remove(PENDING_CODES_FILE)
-            print(f"✅ Todos los códigos procesados. Se eliminó '{PENDING_CODES_FILE}'.")
+    # Si NO se paró por tiempo, no hay pendientes
+    if not stopped_by_time:
+        pending_items = []
 
-    # Exporta CSV/XLSX SOLO con lo procesado en esta corrida
+    pending_codes = [p for (k, p) in pending_items if k == "code"]
+
+    # Exporta CSV/XLSX de este loop
     df = pd.DataFrame(results, columns=COLUMNS)
-    df.to_csv("cyberpuerta_datos.csv", index=False, encoding="utf-8-sig")
+    csv_name = f"cyberpuerta_datos_loop{loop_index}.csv"
+    xlsx_name = f"cyberpuerta_datos_loop{loop_index}.xlsx"
 
-    with pd.ExcelWriter("cyberpuerta_datos.xlsx", engine="xlsxwriter") as writer:
+    df.to_csv(csv_name, index=False, encoding="utf-8-sig")
+    with pd.ExcelWriter(xlsx_name, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Datos")
         ws = writer.sheets["Datos"]
         for col in ["URL_BUSQUEDA", "URL_PRODUCTO"]:
@@ -661,10 +692,35 @@ def main():
                     if isinstance(val, str) and val.startswith("http"):
                         ws.write_url(r, c, val, string=val)
 
-    print("\n✅ Listo: 'cyberpuerta_datos.csv' y 'cyberpuerta_datos.xlsx' generados.")
-    return df
+    print(f"\n✅ LOOP {loop_index}: '{csv_name}' y '{xlsx_name}' generados.")
+
+    # Guardar pendientes SOLO si loop_index < 3
+    if pending_codes and loop_index < 3:
+        pending_file = f"cyberpuerta_pending_codes_loop{loop_index}.txt"
+        with open(pending_file, "w", encoding="utf-8") as f:
+            for code in pending_codes:
+                f.write(code + "\n")
+        print(
+            f"⚠️ Quedaron {len(pending_codes)} códigos pendientes en el loop {loop_index}.\n"
+            f"   Se guardaron en '{pending_file}' para el siguiente loop."
+        )
+    elif pending_codes and loop_index >= 3:
+        # Ya no habrá más loops automáticos – opcionalmente guardamos para referencia
+        pending_file = f"cyberpuerta_pending_codes_loop{loop_index}.txt"
+        with open(pending_file, "w", encoding="utf-8") as f:
+            for code in pending_codes:
+                f.write(code + "\n")
+        print(
+            f"⚠️ Loop 3 también llegó al límite de tiempo. Se guardaron {len(pending_codes)} pendientes "
+            f"en '{pending_file}', pero no habrá un cuarto loop automático."
+        )
+    else:
+        print(f"✅ LOOP {loop_index}: No quedaron códigos pendientes.")
+
+    return df, csv_name, xlsx_name
 
 
+# ======================= EMAIL (igual a tu versión) =======================
 def enviar_resultados_por_mail(
     sender: str,
     password: str,
@@ -677,7 +733,6 @@ def enviar_resultados_por_mail(
     if archivos_adjuntos is None:
         archivos_adjuntos = []
 
-    # 1) Crear mensaje
     msg = EmailMessage()
     msg["Subject"] = "Resultados scraper Cyberpuerta"
     msg["From"] = sender
@@ -686,12 +741,10 @@ def enviar_resultados_por_mail(
     cuerpo = (
         "Hola Abraham,\n\n"
         "Te mando los archivos generados hoy por el scraper de Cyberpuerta.\n\n"
-        "Si ves varios correos en el mismo día, corresponden a diferentes partes (por límite de tiempo).\n\n"
         "Saludos."
     )
     msg.set_content(cuerpo)
 
-    # 2) Adjuntar archivos
     for filename in archivos_adjuntos:
         try:
             with open(filename, "rb") as f:
@@ -706,7 +759,6 @@ def enviar_resultados_por_mail(
         except FileNotFoundError:
             print(f"⚠️ No encontré el archivo: {filename}, no se adjunta.")
 
-    # 3) Enviar usando Gmail (SMTP_SSL, puerto 465)
     context = ssl.create_default_context()
     print("📨 Enviando correo...")
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
@@ -715,19 +767,22 @@ def enviar_resultados_por_mail(
     print("✅ Correo enviado correctamente.")
 
 
-# ⚠️ SOLO PARA COLAB. NO SUBIR ESTO A GITHUB DESPUÉS ⚠️
+# ======================= PUNTO DE ENTRADA =======================
+if __name__ == "__main__":
+    print(f"🔁 Iniciando scraper – LOOP_INDEX = {LOOP_INDEX}")
+    df, csv_name, xlsx_name = main(loop_index=LOOP_INDEX)
 
-EMAIL_SENDER = "abrahammichan@procesadores.net"      # el Gmail desde donde vas a enviar
-EMAIL_PASSWORD = "xwib uuqa iykz cmgo"  # si tienes 2FA, usa App Password
-EMAIL_TO = "abrahammichan@procesadores.net, ruben@procesadores.net"
+    # Leer credenciales de entorno (NO hard-codear en GitHub)
+    EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
+    EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
+    EMAIL_TO = os.environ.get("EMAIL_TO")
 
-# 1) Ejecutar el scraper (usa la función main() que definimos arriba)
-df = main()   # Esto genera cyberpuerta_datos.csv y cyberpuerta_datos.xlsx (solo de esta parte)
-
-# 2) Enviar los archivos por correo
-enviar_resultados_por_mail(
-    sender=EMAIL_SENDER,
-    password=EMAIL_PASSWORD,
-    recipient=EMAIL_TO,
-    archivos_adjuntos=["cyberpuerta_datos.csv", "cyberpuerta_datos.xlsx"],
-)
+    if EMAIL_SENDER and EMAIL_PASSWORD and EMAIL_TO:
+        enviar_resultados_por_mail(
+            sender=EMAIL_SENDER,
+            password=EMAIL_PASSWORD,
+            recipient=EMAIL_TO,
+            archivos_adjuntos=[csv_name, xlsx_name],
+        )
+    else:
+        print("ℹ️ Email no configurado (EMAIL_SENDER / EMAIL_PASSWORD / EMAIL_TO). No se envía correo.")
