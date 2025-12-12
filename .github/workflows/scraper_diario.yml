@@ -31,8 +31,8 @@ jobs:
         env:
           LOOP_INDEX: "1"
 
-          CYBERPUERTA_MAX_HOURS: "0.07"
-          CYBERPUERTA_GUARD_MINUTES: "1"
+          CYBERPUERTA_MAX_HOURS: "5.667"
+          CYBERPUERTA_GUARD_MINUTES: "10"
 
           # Para producción:
           # CYBERPUERTA_MAX_HOURS: "5.667"
@@ -52,8 +52,8 @@ jobs:
         env:
           LOOP_INDEX: "2"
 
-          CYBERPUERTA_MAX_HOURS: "0.07"
-          CYBERPUERTA_GUARD_MINUTES: "1"
+          CYBERPUERTA_MAX_HOURS: "5.667"
+          CYBERPUERTA_GUARD_MINUTES: "10"
 
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
@@ -73,8 +73,8 @@ jobs:
         env:
           LOOP_INDEX: "3"
 
-          CYBERPUERTA_MAX_HOURS: "0.07"
-          CYBERPUERTA_GUARD_MINUTES: "1"
+          CYBERPUERTA_MAX_HOURS: "5.667"
+          CYBERPUERTA_GUARD_MINUTES: "10"
 
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
