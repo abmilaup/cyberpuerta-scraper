@@ -1,8 +1,10 @@
+# -*- coding: utf-8 -*-
+"""ejecucuion cyberpuerta git hub MOD TIEMPO 5h40 + PENDIENTES"""
+
+!pip -q install "requests==2.32.4" "beautifulsoup4==4.12.3" "lxml==5.2.2" "xlsxwriter==3.2.0" pandas
+
 import os
-import re
-import sys
-import time
-import random
+import re, time, random, sys, statistics
 from datetime import datetime
 from urllib.parse import urljoin, quote_plus
 
@@ -12,473 +14,446 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import smtplib
+import ssl
 from email.message import EmailMessage
 
-# ============================================================
-# CONFIGURACIÓN GENERAL
-# ============================================================
+# ================= PARÁMETROS (ajústalos si quieres) =================
 
-BASE_URL = "https://www.cyberpuerta.mx/"
-BASE_SEARCH = BASE_URL + "index.php?cl=search&searchparam="
+# ⏲️ LÍMITE GLOBAL DE TIEMPO POR EJECUCIÓN: 5h 40min
+TIME_LIMIT_SECONDS = 5 * 3600 + 40 * 60  # 20400 segundos
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
-}
+# Archivo donde se guardan los códigos pendientes entre ejecuciones
+PENDING_CODES_FILE = "cyberpuerta_pending_codes.txt"
 
-# ¿Estamos corriendo dentro de GitHub Actions?
-IS_GITHUB = os.environ.get("GITHUB_ACTIONS") == "true"
+INPUT_CODES = """
 
-# Límite de tiempo TOTAL del script (sólo se usa en GitHub si está definido)
-GLOBAL_MAX_RUNTIME_SECONDS = None
-if IS_GITHUB:
-    GLOBAL_MAX_RUNTIME_SECONDS = float(
-        os.environ.get("CYBERPUERTA_MAX_RUNTIME", "21000")
-    )
+HDTP320XK3AA
+HDTX120XSCAA
 
-# Número máximo de pasadas (loops) sobre códigos pendientes
-MAX_PASSES = int(os.environ.get("CYBERPUERTA_MAX_PASSES", "3"))
+""".strip()
 
-# Colchón en segundos antes del límite de tiempo para cortar cada pasada
-PASS_GUARD_SECONDS = float(os.environ.get("CYBERPUERTA_PASS_GUARD", "600"))
-
-# Parámetros de espera y backoff (ajustados para GitHub / local)
-if IS_GITHUB:
-    # Versión optimizada para GitHub (prudente pero más rápida)
-    INITIAL_WAIT_RANGE = (30.0, 45.0)  # espera inicial antes de cada SKU
-    BETWEEN_REQUESTS = (2.0, 4.0)      # espera entre requests
-    MAX_RETRIES = 4
-    BACKOFF_BASE = 3.0
-    BACKOFF_CAP = 45.0
-    ALPHA_SENSITIVITY = 0.5           # sensibilidad al ratio de 429
-    ROLLING_WINDOW = 10               # cuántos últimos status mirar
-else:
-    # Versión algo más tranquila para local/colab
-    INITIAL_WAIT_RANGE = (40.0, 70.0)
-    BETWEEN_REQUESTS = (3.0, 6.0)
-    MAX_RETRIES = 6
-    BACKOFF_BASE = 3.0
-    BACKOFF_CAP = 60.0
-    ALPHA_SENSITIVITY = 0.8
-    ROLLING_WINDOW = 8
-
-
-# ============================================================
-# ENTRADAS (CÓDIGOS / URLS)
-# ============================================================
-
-# Aquí pegas tus SKUs de Cyberpuerta / partes, uno por línea:
-INPUT_CODES_RAW = """
-KF560C36BBE2-16
-WDBU6Y0040BBK-WESN
-HDWG760XZSTA
-"""
-
-# Si además quieres pasar URLs directas de producto:
 INPUT_URLS = [
-    # "https://www.cyberpuerta.mx/Algo/Producto.html",
+    # Si quieres, puedes poner URLs directas aquí
+    # "https://www.cyberpuerta.mx/index.php?cl=search&searchparam=AUSDH16GUICL10-RA1",
 ]
 
+BASE_SEARCH = "https://www.cyberpuerta.mx/index.php?cl=search&searchparam="
 
-def load_codes():
-    """
-    Devuelve la lista de códigos a procesar.
+# --- Control de tiempos ---
+INITIAL_WAIT_RANGE = (50.0, 80.0)   # espera mínima obligatoria ANTES de la búsqueda (primer intento) por SKU
+BETWEEN_REQUESTS    = (4.0, 7.0)    # espera entre búsqueda y detalle
+MAX_RETRIES         = 7             # reintentos por petición (para 429/403/5xx)
+BACKOFF_BASE        = 4.0           # base para backoff exponencial en 429/403
+BACKOFF_CAP         = 90.0          # tope de cada backoff
 
-    - Por defecto usa INPUT_CODES_RAW embebido (uno por línea).
-    - Si existe la env CYBERPUERTA_CODES_FILE y el archivo existe,
-      lee los códigos (uno por línea) desde ese archivo.
-    """
-    codes_literal = [ln.strip() for ln in INPUT_CODES_RAW.splitlines() if ln.strip()]
-    codes_file = os.environ.get("CYBERPUERTA_CODES_FILE")
+# Adaptador de espera según “salud” reciente (cuántos 429 hemos visto)
+ROLLING_WINDOW      = 6             # últimos N SKUs para medir ratio de 429
+ALPHA_SENSITIVITY   = 1.2           # cuánto aumentar/bajar la espera inicial por ratio de 429 (0..1)
+#   - Si ratio_429 = 0.0 -> multiplicador ≈ 1.0
+#   - Si ratio_429 = 1.0 -> multiplicador ≈ 1.0 + ALPHA_SENSITIVITY
 
-    if codes_file and os.path.isfile(codes_file):
-        try:
-            with open(codes_file, encoding="utf-8") as f:
-                file_codes = [ln.strip() for ln in f if ln.strip()]
-            if file_codes:
-                print(f"📥 Leyendo {len(file_codes)} códigos desde archivo '{codes_file}'.")
-                return file_codes
-            else:
-                print(f"⚠️ El archivo '{codes_file}' está vacío; uso INPUT_CODES_RAW embebido.")
-        except Exception as e:
-            print(f"⚠️ No se pudo leer '{codes_file}': {e}. Uso INPUT_CODES_RAW embebido.")
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
 
-    print(f"📥 Usando {len(codes_literal)} códigos embebidos en INPUT_CODES_RAW.")
-    return codes_literal
-
-
-# ============================================================
-# COLUMNAS DE SALIDA
-# ============================================================
-
-COLUMNS = [
-    "TIMESTAMP",
-    "SKU",
-    "URL_BUSQUEDA",
-    "URL_PRODUCTO",
-    "TITULO",
-    "PRECIO_TEXTO",
-    "PRECIO_NUM",
-    "STOCK_TEXTO",
-    "STOCK_NUM",
-    "STATUS",
-]
+# ================== Sesión HTTP con retries básicos (5xx) ==================
+session = requests.Session()
+session.headers.update({
+    "User-Agent": UA,
+    "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.cyberpuerta.mx/",
+    "Cache-Control": "no-cache",
+})
+retry = Retry(
+    total=MAX_RETRIES,
+    connect=MAX_RETRIES,
+    read=MAX_RETRIES,
+    backoff_factor=0.5,
+    status_forcelist=[500, 502, 503, 504],
+    allowed_methods=["GET", "HEAD"],
+    raise_on_status=False,
+)
+session.mount("http://", HTTPAdapter(max_retries=retry))
+session.mount("https://", HTTPAdapter(max_retries=retry))
 
 
-def row_to_tsv(row: dict) -> str:
-    """Convierte un dict row a una línea TSV para imprimir en consola."""
-    return "\t".join(str(row.get(col, "") or "") for col in COLUMNS)
+def jitter(a, b):
+    return random.uniform(a, b)
 
 
-# ============================================================
-# SESIÓN HTTP + ESPERAS ADAPTATIVAS
-# ============================================================
+def sleep_range(a, b):
+    t = jitter(a, b)
+    time.sleep(t)
+    return t  # devolvemos lo que realmente durmió para log
 
-def build_session() -> requests.Session:
-    session = requests.Session()
-    retries = Retry(
-        total=MAX_RETRIES,
-        backoff_factor=0.0,  # el backoff lo manejamos nosotros
-        status_forcelist=[429, 403, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-        raise_on_status=False,
+
+def to_number(txt):
+    if not txt:
+        return None
+    t = (
+        txt.replace("$","")
+          .replace("MXN","")
+          .replace("mxn","")
+          .replace("\xa0"," ")
+          .strip()
     )
-    adapter = HTTPAdapter(max_retries=retries)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
-
-
-session = build_session()
-recent_status_codes = []  # para calcular ratio de 429
-
-
-def compute_adaptive_initial_wait() -> float:
-    """Calcula una espera inicial adaptativa según el ratio reciente de 429."""
-    base = random.uniform(*INITIAL_WAIT_RANGE)
-    if not recent_status_codes:
-        return base
-
-    last = recent_status_codes[-ROLLING_WINDOW:]
-    ratio_429 = 0.0
-    if last:
-        ratio_429 = sum(1 for c in last if c == 429) / len(last)
-
-    factor = 1.0 + ALPHA_SENSITIVITY * ratio_429
-    wait = base * factor
-    return wait
-
-
-def fetch_url(url: str) -> str:
-    """
-    Hace GET a una URL con reintentos y backoff manual para 429/403/errores.
-    Devuelve el texto HTML.
-    """
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = session.get(url, headers=HEADERS, timeout=30)
-            status = resp.status_code
-
-            # Guardar status en lista para ratio de 429
-            recent_status_codes.append(status)
-            if len(recent_status_codes) > ROLLING_WINDOW:
-                del recent_status_codes[0]
-
-            if status in (429, 403):
-                wait = min(BACKOFF_BASE * (2 ** (attempt - 1)), BACKOFF_CAP)
-                print(
-                    f"⚠️ {status} en intento {attempt} para {url}. "
-                    f"Esperando {wait:.1f} s antes de reintentar..."
-                )
-                time.sleep(wait)
-                continue
-
-            resp.raise_for_status()
-            # Pausa pequeña entre requests para no pegar demasiado rápido
-            time.sleep(random.uniform(*BETWEEN_REQUESTS))
-            return resp.text
-
-        except requests.RequestException as e:
-            if attempt == MAX_RETRIES:
-                print(f"❌ Error definitivo al pedir {url}: {e}")
-                raise
-            wait = min(BACKOFF_BASE * (2 ** (attempt - 1)), BACKOFF_CAP)
-            print(
-                f"⚠️ Error {e} en intento {attempt} para {url}. "
-                f"Esperando {wait:.1f} s antes de reintentar..."
-            )
-            time.sleep(wait)
-
-    raise RuntimeError(f"No se pudo obtener {url} después de {MAX_RETRIES} intentos.")
-
-
-# ============================================================
-# PARSEO HTML: PRECIO / STOCK / PRODUCTOS
-# ============================================================
-
-def parse_price(text: str):
-    """
-    Convierte un texto tipo '$ 1,234.56' o '1.234,56' a float.
-    Devuelve None si no se puede.
-    """
-    if not text:
-        return None
-
-    cleaned = re.sub(r"[^\d,\.]", "", text)
-
-    if "," in cleaned and "." in cleaned:
-        # Heurística: si la coma está al final, es decimal estilo '1.234,56'
-        if cleaned.rfind(",") > cleaned.rfind("."):
-            cleaned = cleaned.replace(".", "").replace(",", ".")
-        else:
-            cleaned = cleaned.replace(",", "")
-    else:
-        cleaned = cleaned.replace(",", "")
-
+    t = re.sub(r"[^\d\.,]", "", t).replace(",", "")
     try:
-        return float(cleaned)
-    except ValueError:
+        return float(t)
+    except:
         return None
 
 
-def parse_stock(text: str):
-    """
-    Extrae un número aproximado de stock a partir de un texto.
-    - Si contiene 'agotado' o 'no disponible' => 0
-    - Si contiene un número => ese número
-    - Si no, devuelve None
-    """
-    if not text:
-        return None
-
-    lower = text.lower()
-    if "agotado" in lower or "no disponible" in lower:
-        return 0
-
-    m = re.search(r"(\d+)", text)
-    if m:
-        try:
-            return int(m.group(1))
-        except ValueError:
-            pass
-
+def parse_first_product_url_from_search(html, current_url):
+    soup = BeautifulSoup(html, "lxml")
+    css_candidates = [
+        "h2.productTitle a[href]",
+        "a.product__title[href]",
+        "a.title[href]",
+        'a[href*="cl=details"][href$=".html"]',
+        'a[href$=".html"]',
+    ]
+    for sel in css_candidates:
+        a = soup.select_one(sel)
+        if a and a.get("href"):
+            return urljoin(current_url, a["href"])
+    # fallback muy genérico
+    for a in soup.select("a[href]"):
+        href = a.get("href", "")
+        if href.endswith(".html"):
+            return urljoin(current_url, href)
     return None
 
 
-def scrape_product_page(url: str, sku: str = "") -> dict:
-    """
-    Parsea la página de producto de Cyberpuerta para extraer:
-    - título
-    - precio
-    - stock (aproximado)
-    """
-    html = fetch_url(url)
+def extract_all_from_product(html):
     soup = BeautifulSoup(html, "lxml")
-
     # Título
-    title_el = soup.find("h1")
-    title = title_el.get_text(strip=True) if title_el else ""
+    title = ""
+    h1 = soup.select_one("h1.detailsInfo_right_title") or soup.find("h1")
+    if h1:
+        title = h1.get_text(strip=True)
+    # Precio
+    price_text = ""
+    meta_price = soup.select_one('meta[itemprop="price"][content]')
+    if meta_price:
+        price_text = meta_price["content"]
+    if not price_text:
+        price_span = soup.select_one("#productPrice") or soup.select_one("span.priceText")
+        if price_span:
+            price_text = price_span.get_text(" ", strip=True)
+    if not price_text:
+        body_txt = soup.get_text(" ", strip=True)
+        m = re.search(r"\$\s*[\d\.,]+", body_txt)
+        if m:
+            price_text = m.group(0)
+    price_num = to_number(price_text)
 
-    # Precio (intentamos varios selectores típicos)
-    price_el = (
-        soup.select_one('[itemprop="price"]')
-        or soup.select_one(".price")
-        or soup.select_one(".offer-price")
-    )
-    price_text = price_el.get_text(" ", strip=True) if price_el else ""
-    price_num = parse_price(price_text) if price_text else None
-
-    # Stock (texto donde aparezca 'disponible' o 'agotado')
-    stock_text = ""
-    stock_num = None
-
-    stock_candidates = soup.find_all(
-        string=re.compile(r"(disponible|agotado|no disponible)", re.I)
-    )
-    if stock_candidates:
-        # Tomamos el primero razonable
-        st = stock_candidates[0]
-        if hasattr(st, "parent"):
-            stock_text = st.parent.get_text(" ", strip=True)
+    # Stock
+    stock_text, stock_num = "", None
+    s1 = soup.select_one("div.stock span.stockFlag span")
+    if s1:
+        n = s1.get_text(strip=True)
+        if n.isdigit():
+            stock_num = int(n)
+            stock_text = f"Disponibles: {stock_num} pzas."
+    if stock_num is None:
+        s2 = soup.select_one("div.stock span.stockFlag")
+        if s2:
+            txt = s2.get_text(" ", strip=True)
+            m = re.search(r"Disponibles?:\s*(\d+)", txt, flags=re.I)
+            if m:
+                stock_num = int(m.group(1))
+                stock_text = f"Disponibles: {stock_num} pzas."
+    if stock_num is None:
+        body = soup.get_text(" ", strip=True).lower()
+        if ("agotado" in body) or ("no disponible" in body):
+            stock_num = 0
+            stock_text = "Agotado"
         else:
-            stock_text = str(st)
-        stock_num = parse_stock(stock_text)
+            m = re.search(r"Disponibles?\s*:?\s*(\d+)", body, flags=re.I)
+            if m:
+                stock_num = int(m.group(1))
+                stock_text = f"Disponibles: {stock_num} pzas."
 
+    return title, (price_text or ""), price_num, (stock_text or ""), (stock_num if stock_num is not None else "")
+
+
+# ====== Registro de 429 recientes para adaptar la espera inicial ======
+recent_429 = []  # lista de bool (True si el SKU tuvo al menos un 429 en su ciclo)
+
+
+def current_429_ratio():
+    if not recent_429:
+        return 0.0
+    # proporción de SKUs recientes que sufrieron 429
+    return sum(1 for x in recent_429 if x) / len(recent_429)
+
+
+def planned_initial_wait():
+    # base aleatoria mínima
+    base = jitter(*INITIAL_WAIT_RANGE)  # siempre >= 50s
+    ratio = current_429_ratio()         # 0..1
+    multiplier = 1.0 + ALPHA_SENSITIVITY * ratio
+    planned = base * multiplier
+    return planned
+
+
+def get_with_backoff(url, allow_redirects=True, timeout=30, mark_429_flag=None):
+    """
+    GET con manejo 429/403:
+    - backoff exponencial desde BACKOFF_BASE, con tope BACKOFF_CAP, + jitter.
+    - marca en mark_429_flag[0] = True si aparece algún 429.
+    """
+    last_status = None
+    for i in range(MAX_RETRIES):
+        try:
+            r = session.get(url, allow_redirects=allow_redirects, timeout=timeout)
+            last_status = r.status_code
+            if r.status_code in (200, 404):
+                return r
+            if r.status_code in (429, 403):
+                if mark_429_flag is not None:
+                    mark_429_flag[0] = True
+                wait = min(BACKOFF_BASE * (2 ** i), BACKOFF_CAP) + jitter(1.0, 4.0)
+                print(f"   HTTP {r.status_code} en {url} -> backoff {wait:.1f}s (reintento {i+1}/{MAX_RETRIES})")
+                time.sleep(wait)
+                continue
+            time.sleep(1.5 + i * 0.5)
+        except requests.RequestException as e:
+            wait = 2.0 + i * 1.25
+            print(f"   Error de red en {url}: {e} -> esperando {wait:.1f}s (reintento {i+1}/{MAX_RETRIES})")
+            time.sleep(wait)
+    return None
+
+
+# ================ Helpers de salida en consola (TAB para Excel) ================
+COLUMNS = ["TIMESTAMP","SKU","URL_BUSQUEDA","URL_PRODUCTO","TITULO","PRECIO_TEXTO","PRECIO_NUM","STOCK_TEXTO","STOCK_NUM","STATUS"]
+
+def row_to_tsv(row: dict) -> str:
+    def fmt(x):
+        if x is None:
+            return ""
+        s = str(x)
+        return s.replace("\t"," ").replace("\r"," ").replace("\n"," ").strip()
+    return "\t".join(fmt(row.get(col,"")) for col in COLUMNS)
+
+def print_header_once():
+    print("\t".join(COLUMNS))
+    sys.stdout.flush()
+
+
+# ========================= Flujo por código / URL =========================
+def process_code(code):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sku = code
+    url_search = BASE_SEARCH + quote_plus(code) + f"&_ts={int(time.time()*1000)}"
+    url_prod = ""
     status = "OK"
-    if not price_num and not price_text:
-        status = "Sin precio detectable"
-    if not title:
-        status = "OK (sin título)" if status == "OK" else status + " + sin título"
+    title = ""; p_txt = ""; p_num = ""; s_txt = ""; s_num = ""
+
+    saw_429 = [False]  # se pasa por referencia
+
+    # 1) Espera inicial ADAPTATIVA (nunca < 50s)
+    initial_wait = planned_initial_wait()
+    print(f"   ⏳ Espera inicial antes de buscar '{sku}': {initial_wait:.1f}s (ratio 429 reciente: {current_429_ratio():.2f})")
+    time.sleep(initial_wait)
+
+    # 2) Búsqueda
+    r = get_with_backoff(url_search, mark_429_flag=saw_429)
+    if not r:
+        return {
+            "TIMESTAMP": ts, "SKU": sku, "URL_BUSQUEDA": url_search, "URL_PRODUCTO": "",
+            "TITULO": "", "PRECIO_TEXTO": "", "PRECIO_NUM": "", "STOCK_TEXTO": "",
+            "STOCK_NUM": "", "STATUS": "HTTP error búsqueda"
+        }
+    if r.status_code == 404:
+        return {
+            "TIMESTAMP": ts, "SKU": sku, "URL_BUSQUEDA": url_search, "URL_PRODUCTO": "",
+            "TITULO": "", "PRECIO_TEXTO": "", "PRECIO_NUM": "", "STOCK_TEXTO": "",
+            "STOCK_NUM": "", "STATUS": "404 búsqueda"
+        }
+
+    _slept = sleep_range(*BETWEEN_REQUESTS)
+    first = parse_first_product_url_from_search(r.text, r.url)
+    if not first:
+        return {
+            "TIMESTAMP": ts, "SKU": sku, "URL_BUSQUEDA": url_search, "URL_PRODUCTO": "",
+            "TITULO": "", "PRECIO_TEXTO": "", "PRECIO_NUM": "", "STOCK_TEXTO": "",
+            "STOCK_NUM": "", "STATUS": "Sin resultados"
+        }
+
+    url_prod = first
+    # 3) Detalle
+    r2 = get_with_backoff(url_prod, mark_429_flag=saw_429)
+    if not r2 or r2.status_code == 404:
+        return {
+            "TIMESTAMP": ts, "SKU": sku, "URL_BUSQUEDA": url_search, "URL_PRODUCTO": url_prod,
+            "TITULO": "", "PRECIO_TEXTO": "", "PRECIO_NUM": "", "STOCK_TEXTO": "",
+            "STOCK_NUM": "", "STATUS": f"HTTP error detalle ({None if not r2 else r2.status_code})"
+        }
+
+    title, p_txt, p_num, s_txt, s_num = extract_all_from_product(r2.text)
+
+    # 4) Registrar si hubo 429 en este SKU (para adaptar el próximo)
+    recent_429.append(bool(saw_429[0]))
+    if len(recent_429) > ROLLING_WINDOW:
+        recent_429.pop(0)
 
     return {
+        "TIMESTAMP": ts,
+        "SKU": sku,
+        "URL_BUSQUEDA": url_search,
+        "URL_PRODUCTO": url_prod,
         "TITULO": title,
-        "PRECIO_TEXTO": price_text,
-        "PRECIO_NUM": price_num,
-        "STOCK_TEXTO": stock_text,
-        "STOCK_NUM": stock_num,
-        "STATUS": status,
+        "PRECIO_TEXTO": p_txt,
+        "PRECIO_NUM": p_num if p_num != "" else "",
+        "STOCK_TEXTO": s_txt,
+        "STOCK_NUM": s_num if s_num != "" else "",
+        "STATUS": status
     }
 
 
-def search_code_in_cyberpuerta(code: str):
-    """
-    Busca el código en Cyberpuerta y devuelve:
-    (url_busqueda, url_producto, status_text)
+def process_url(url):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sku = ""
+    url_search = url
+    url_prod = ""
+    status = "OK"
+    title = ""; p_txt = ""; p_num = ""; s_txt = ""; s_num = ""
+    saw_429 = [False]
 
-    Estrategia:
-    1) Hacer la búsqueda normal.
-    2) Buscar el primer <a> cuya href contenga el SKU.
-    3) Si no se encuentra, usar los selectores antiguos como respaldo.
-    """
-    search_url = BASE_SEARCH + quote_plus(code)
-    html = fetch_url(search_url)
-    soup = BeautifulSoup(html, "lxml")
+    initial_wait = planned_initial_wait()
+    print(f"   ⏳ Espera inicial antes de buscar URL: {initial_wait:.1f}s (ratio 429 reciente: {current_429_ratio():.2f})")
+    time.sleep(initial_wait)
 
-    link = None
+    r = get_with_backoff(url_search, mark_429_flag=saw_429)
+    if not r:
+        return {
+            "TIMESTAMP": ts, "SKU": sku, "URL_BUSQUEDA": url_search, "URL_PRODUCTO": "",
+            "TITULO": "", "PRECIO_TEXTO": "", "PRECIO_NUM": "", "STOCK_TEXTO": "",
+            "STOCK_NUM": "", "STATUS": "HTTP error URL"
+        }
 
-    # 1) Intento principal: cualquier <a> cuyo href contenga el SKU
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if code.lower() in href.lower():
-            link = a
+    if "searchparam=" in url_search:
+        _slept = sleep_range(*BETWEEN_REQUESTS)
+        first = parse_first_product_url_from_search(r.text, r.url)
+        if first:
+            url_prod = first
+            r2 = get_with_backoff(url_prod, mark_429_flag=saw_429)
+            if r2 and r2.status_code != 404:
+                title, p_txt, p_num, s_txt, s_num = extract_all_from_product(r2.text)
+            else:
+                status = f"HTTP error detalle ({None if not r2 else r2.status_code})"
+        else:
+            status = "Sin resultados"
+    else:
+        url_prod = r.url
+        title, p_txt, p_num, s_txt, s_num = extract_all_from_product(r.text)
+
+    recent_429.append(bool(saw_429[0]))
+    if len(recent_429) > ROLLING_WINDOW:
+        recent_429.pop(0)
+
+    return {
+        "TIMESTAMP": ts,
+        "SKU": sku,
+        "URL_BUSQUEDA": url_search,
+        "URL_PRODUCTO": url_prod,
+        "TITULO": title,
+        "PRECIO_TEXTO": p_txt,
+        "PRECIO_NUM": p_num if p_num != "" else "",
+        "STOCK_TEXTO": s_txt,
+        "STOCK_NUM": s_num if s_num != "" else "",
+        "STATUS": status
+    }
+
+
+# =============================== Main ===============================
+def main():
+    # ⏲️ Inicio de la ejecución (para controlar las 5h40)
+    start_time = time.time()
+
+    # 1) Leer códigos: primero intentamos pendientes, si no, usamos INPUT_CODES
+    codes = []
+    if os.path.isfile(PENDING_CODES_FILE):
+        with open(PENDING_CODES_FILE, "r", encoding="utf-8") as f:
+            codes = [ln.strip() for ln in f if ln.strip()]
+        if codes:
+            print(f"📥 Cargando {len(codes)} códigos pendientes desde '{PENDING_CODES_FILE}'.")
+        else:
+            print(f"⚠️ '{PENDING_CODES_FILE}' está vacío, se usarán INPUT_CODES.")
+    if not codes:
+        codes = [ln.strip() for ln in INPUT_CODES.splitlines() if ln.strip()]
+        print(f"📥 Cargando {len(codes)} códigos desde INPUT_CODES embebido.")
+
+    urls  = [u.strip() for u in INPUT_URLS if u.strip()]
+    items = [("code", c) for c in codes] + [("url", u) for u in urls]
+
+    results = []
+    pending_codes = []
+    total = len(items)
+    print(f"Procesando {total} ítems…\n")
+    print("\t".join(COLUMNS))
+    sys.stdout.flush()
+
+    for i, (kind, payload) in enumerate(items, 1):
+        # ⏲️ Checar límite de tiempo ANTES de procesar este ítem
+        elapsed = time.time() - start_time
+        if elapsed >= TIME_LIMIT_SECONDS:
+            print(f"\n⏹️ Se alcanzó el límite de tiempo de {TIME_LIMIT_SECONDS/3600:.2f} horas.")
+            print(f"   Se detiene en el ítem {i}/{total}. Lo que falta se guardará como pendientes.")
+            # Guardar los restantes como pendientes
+            remaining = items[i-1:]
+            pending_codes = [p for (k, p) in remaining if k == "code"]
             break
 
-    # 2) Fallback: los selectores antiguos
-    if not link:
-        link = (
-            soup.select_one("a.product-link")
-            or soup.select_one("a[href*='/articulo/']")
-            or soup.select_one("a[href*='Producto']")
-        )
+        try:
+            if kind == "code":
+                row = process_code(payload)
+            else:
+                row = process_url(payload)
+            results.append(row)
 
-    if not link:
-        # No se encontró ningún enlace de producto
-        return search_url, "", "Sin resultados en búsqueda"
+            print(f"[{i}/{total}] {payload} -> {row['STATUS']}")
+            print(row_to_tsv(row))
+            sys.stdout.flush()
 
-    href = link.get("href", "")
-    product_url = urljoin(BASE_URL, href)
-
-    return search_url, product_url, "Encontrado en búsqueda"
-
-# ============================================================
-# PROCESAMIENTO DE CÓDIGOS / URLS
-# ============================================================
-
-def process_code(code: str) -> dict:
-    """
-    Procesa un código (SKU): hace espera inicial, lo busca y luego scrapea.
-    """
-    wait_s = compute_adaptive_initial_wait()
-    print(f"⏳ Esperando {wait_s:.1f} s antes de buscar código '{code}'...")
-    time.sleep(wait_s)
-
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    try:
-        search_url, product_url, status = search_code_in_cyberpuerta(code)
-        if not product_url:
-            # No hay producto, devolvemos fila básica
-            return {
-                "TIMESTAMP": ts,
-                "SKU": code,
-                "URL_BUSQUEDA": search_url,
+        except Exception as e:
+            row = {
+                "TIMESTAMP": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "SKU": payload if kind == "code" else "",
+                "URL_BUSQUEDA": BASE_SEARCH + quote_plus(payload) if kind == "code" else payload,
                 "URL_PRODUCTO": "",
-                "TITULO": "",
-                "PRECIO_TEXTO": "",
-                "PRECIO_NUM": None,
-                "STOCK_TEXTO": "",
-                "STOCK_NUM": None,
-                "STATUS": status,
+                "TITULO": "", "PRECIO_TEXTO": "", "PRECIO_NUM": "",
+                "STOCK_TEXTO": "", "STOCK_NUM": "", "STATUS": f"Error: {e}"
             }
+            results.append(row)
+            print(f"[{i}/{total}] {payload} -> Error: {e}")
+            print(row_to_tsv(row))
+            sys.stdout.flush()
 
-        data = scrape_product_page(product_url, sku=code)
-        row = {
-            "TIMESTAMP": ts,
-            "SKU": code,
-            "URL_BUSQUEDA": search_url,
-            "URL_PRODUCTO": product_url,
-        }
-        row.update(data)
-        return row
+    # Guardar pendientes (si hay)
+    if pending_codes:
+        with open(PENDING_CODES_FILE, "w", encoding="utf-8") as f:
+            for code in pending_codes:
+                f.write(code + "\n")
+        print(f"\n⚠️ Quedaron {len(pending_codes)} códigos pendientes.")
+        print(f"   Se guardaron en '{PENDING_CODES_FILE}' para la siguiente ejecución.")
+    else:
+        # Si ya no hay pendientes y el archivo existe, lo borramos
+        if os.path.isfile(PENDING_CODES_FILE):
+            os.remove(PENDING_CODES_FILE)
+            print(f"✅ Todos los códigos procesados. Se eliminó '{PENDING_CODES_FILE}'.")
 
-    except Exception as e:
-        return {
-            "TIMESTAMP": ts,
-            "SKU": code,
-            "URL_BUSQUEDA": BASE_SEARCH + quote_plus(code),
-            "URL_PRODUCTO": "",
-            "TITULO": "",
-            "PRECIO_TEXTO": "",
-            "PRECIO_NUM": None,
-            "STOCK_TEXTO": "",
-            "STOCK_NUM": None,
-            "STATUS": f"Error: {e}",
-        }
+    # Exporta CSV/XLSX SOLO con lo procesado en esta corrida
+    df = pd.DataFrame(results, columns=COLUMNS)
+    df.to_csv("cyberpuerta_datos.csv", index=False, encoding="utf-8-sig")
 
-
-def process_url(url: str) -> dict:
-    """
-    Procesa una URL directa de producto.
-    """
-    wait_s = compute_adaptive_initial_wait()
-    print(f"⏳ Esperando {wait_s:.1f} s antes de pedir URL directa '{url}'...")
-    time.sleep(wait_s)
-
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    try:
-        data = scrape_product_page(url, sku="")
-        row = {
-            "TIMESTAMP": ts,
-            "SKU": "",
-            "URL_BUSQUEDA": "",
-            "URL_PRODUCTO": url,
-        }
-        row.update(data)
-        return row
-
-    except Exception as e:
-        return {
-            "TIMESTAMP": ts,
-            "SKU": "",
-            "URL_BUSQUEDA": "",
-            "URL_PRODUCTO": url,
-            "TITULO": "",
-            "PRECIO_TEXTO": "",
-            "PRECIO_NUM": None,
-            "STOCK_TEXTO": "",
-            "STOCK_NUM": None,
-            "STATUS": f"Error: {e}",
-        }
-
-
-# ============================================================
-# EXPORTAR EXCEL/CSV
-# ============================================================
-
-def write_outputs(rows, label):
-    """
-    Escribe CSV y XLSX con el sufijo 'label'.
-    Devuelve lista con los nombres de archivo generados (o [] si no hay filas).
-    """
-    if not rows:
-        print(f"ℹ️ No hay filas para escribir en paso '{label}'.")
-        return []
-
-    df = pd.DataFrame(rows, columns=COLUMNS)
-
-    csv_name = f"cyberpuerta_datos_paso{label}.csv"
-    xlsx_name = f"cyberpuerta_datos_paso{label}.xlsx"
-
-    df.to_csv(csv_name, index=False, encoding="utf-8-sig")
-
-    with pd.ExcelWriter(xlsx_name, engine="xlsxwriter") as writer:
+    with pd.ExcelWriter("cyberpuerta_datos.xlsx", engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Datos")
         ws = writer.sheets["Datos"]
-        # Hacer que las URLs sean clicables
         for col in ["URL_BUSQUEDA", "URL_PRODUCTO"]:
             if col in df.columns:
                 c = df.columns.get_loc(col)
@@ -486,178 +461,73 @@ def write_outputs(rows, label):
                     if isinstance(val, str) and val.startswith("http"):
                         ws.write_url(r, c, val, string=val)
 
-    print(f"✅ Archivos generados para paso '{label}': {csv_name}, {xlsx_name}")
-    return [csv_name, xlsx_name]
+    print("\n✅ Listo: 'cyberpuerta_datos.csv' y 'cyberpuerta_datos.xlsx' generados.")
+    return df
 
 
-# ============================================================
-# EMAIL (OPCIONAL)
-# ============================================================
-
-def send_email_if_configured(attachments):
+def enviar_resultados_por_mail(
+    sender: str,
+    password: str,
+    recipient: str,
+    archivos_adjuntos=None
+):
     """
-    Envía un email con los archivos adjuntos si están configuradas
-    EMAIL_SENDER, EMAIL_PASSWORD y EMAIL_TO en variables de entorno.
+    Envía un correo con los archivos adjuntos generados por el scraper.
     """
-    sender = os.environ.get("EMAIL_SENDER")
-    password = os.environ.get("EMAIL_PASSWORD")
-    to_addr = os.environ.get("EMAIL_TO")
+    if archivos_adjuntos is None:
+        archivos_adjuntos = []
 
-    if not (sender and password and to_addr):
-        print("ℹ️ Email no configurado (EMAIL_SENDER / EMAIL_PASSWORD / EMAIL_TO). No envío correo.")
-        return
-
-    # Filtrar sólo archivos que realmente existan
-    attachments = [a for a in attachments if os.path.isfile(a)]
-    if not attachments:
-        print("ℹ️ No hay archivos existentes para adjuntar. No envío correo.")
-        return
-
+    # 1) Crear mensaje
     msg = EmailMessage()
     msg["Subject"] = "Resultados scraper Cyberpuerta"
     msg["From"] = sender
-    msg["To"] = to_addr
-    msg.set_content(
-        "Te envío los archivos generados por el scraper de Cyberpuerta.\n\n"
-        "Archivos adjuntos:\n" + "\n".join(attachments)
-    )
+    msg["To"] = recipient
 
-    for fname in attachments:
+    cuerpo = (
+        "Hola Abraham,\n\n"
+        "Te mando los archivos generados hoy por el scraper de Cyberpuerta.\n\n"
+        "Si ves varios correos en el mismo día, corresponden a diferentes partes (por límite de tiempo).\n\n"
+        "Saludos."
+    )
+    msg.set_content(cuerpo)
+
+    # 2) Adjuntar archivos
+    for filename in archivos_adjuntos:
         try:
-            with open(fname, "rb") as f:
+            with open(filename, "rb") as f:
                 data = f.read()
             msg.add_attachment(
                 data,
                 maintype="application",
                 subtype="octet-stream",
-                filename=os.path.basename(fname),
+                filename=filename,
             )
-        except Exception as e:
-            print(f"⚠️ No se pudo adjuntar {fname}: {e}")
+            print(f"✅ Adjuntado: {filename}")
+        except FileNotFoundError:
+            print(f"⚠️ No encontré el archivo: {filename}, no se adjunta.")
 
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(sender, password)
-            smtp.send_message(msg)
-        print("📧 Email enviado con éxito.")
-    except Exception as e:
-        print(f"⚠️ Error al enviar email: {e}")
-
-
-# ============================================================
-# MAIN CON LOOP DE HASTA 3 PASADAS
-# ============================================================
-
-def main():
-    global_start = time.time()
-
-    codes_initial = load_codes()
-    urls_initial = [u.strip() for u in INPUT_URLS if u.strip()]
-
-    pending_codes = codes_initial[:]  # copia
-    urls = urls_initial
-
-    all_results = []          # todas las filas de todas las pasadas
-    all_files_for_email = []  # todos los archivos generados
-
-    for pass_idx in range(1, MAX_PASSES + 1):
-        if not pending_codes and (pass_idx == 1 or not urls):
-            print("✅ No hay códigos pendientes y no hay URLs que procesar. Termino.")
-            break
-
-        print("\n" + "=" * 60)
-        print(f"🌀 INICIANDO PASO {pass_idx} (de máximo {MAX_PASSES})")
-        print("=" * 60 + "\n")
-
-        items = [("code", c) for c in pending_codes]
-        # Sólo en la primera pasada procesamos también URLs directas
-        if pass_idx == 1 and urls:
-            items += [("url", u) for u in urls]
-
-        results_pass = []
-        total = len(items)
-        print(f"Procesando {total} ítems en el paso {pass_idx}...\n")
-        print("\t".join(COLUMNS))
-        sys.stdout.flush()
-
-        stopped_by_time = False
-        stop_index = total  # índice donde se detiene (1-based)
-
-        for i, (kind, payload) in enumerate(items, 1):
-            # --------- Checar límite de tiempo global (si aplica) ----------
-            if GLOBAL_MAX_RUNTIME_SECONDS is not None:
-                elapsed = time.time() - global_start
-                remaining = GLOBAL_MAX_RUNTIME_SECONDS - elapsed
-                if remaining <= PASS_GUARD_SECONDS:
-                    print(
-                        f"⏹️ Paso {pass_idx}: cerca del límite de tiempo global "
-                        f"({elapsed/3600:.2f} h usadas, {remaining/60:.1f} min libres). "
-                        f"Deteniendo en ítem {i}/{total}."
-                    )
-                    stopped_by_time = True
-                    stop_index = i
-                    break
-            # --------------------------------------------------------------
-
-            if kind == "code":
-                row = process_code(payload)
-            else:
-                row = process_url(payload)
-
-            results_pass.append(row)
-            all_results.append(row)
-
-            print(f"[{i}/{total}] {payload} -> {row['STATUS']}")
-            print(row_to_tsv(row))
-            sys.stdout.flush()
-
-        # --------- Determinar códigos pendientes tras este paso ----------
-        if stopped_by_time:
-            # Los ítems desde stop_index en adelante no fueron procesados
-            remaining_items = items[stop_index - 1:]
-            pending_codes = [
-                p for (k, p) in remaining_items if k == "code"
-            ]
-        else:
-            pending_codes = []
-
-        # --------- Guardar resultados de este paso ----------
-        files_pass = write_outputs(results_pass, label=pass_idx)
-        all_files_for_email.extend(files_pass)
-
-        # --------- Guardar pendientes de este paso (si hay) ----------
-        if pending_codes:
-            pending_file = f"cyberpuerta_pending_codes_paso{pass_idx}.txt"
-            with open(pending_file, "w", encoding="utf-8") as f:
-                for code in pending_codes:
-                    f.write(code + "\n")
-            print(
-                f"⚠️ Quedaron {len(pending_codes)} códigos pendientes en el paso {pass_idx}, "
-                f"guardados en '{pending_file}'."
-            )
-            all_files_for_email.append(pending_file)
-        else:
-            print(f"✅ En el paso {pass_idx} no quedaron códigos pendientes.")
-
-        # Si no se detuvo por tiempo, ya terminamos todo lo que había que hacer
-        if not stopped_by_time:
-            print("✅ No se detuvo por tiempo; no es necesario otro paso.")
-            break
-
-    # =====================================================
-    # Archivo FULL con todo lo que se alcanzó a procesar
-    # =====================================================
-    full_files = write_outputs(all_results, label="full")
-    all_files_for_email.extend(full_files)
-
-    # Quitar duplicados en la lista de archivos
-    all_files_for_email = list(dict.fromkeys(all_files_for_email))
-
-    # Enviar email si está configurado
-    send_email_if_configured(all_files_for_email)
-
-    print("\n🎉 Script terminado.")
+    # 3) Enviar usando Gmail (SMTP_SSL, puerto 465)
+    context = ssl.create_default_context()
+    print("📨 Enviando correo...")
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+        server.login(sender, password)
+        server.send_message(msg)
+    print("✅ Correo enviado correctamente.")
 
 
-if __name__ == "__main__":
-    main()
+# ⚠️ SOLO PARA COLAB. NO SUBIR ESTO A GITHUB DESPUÉS ⚠️
+
+EMAIL_SENDER = "abrahammichan@procesadores.net"      # el Gmail desde donde vas a enviar
+EMAIL_PASSWORD = "xwib uuqa iykz cmgo"  # si tienes 2FA, usa App Password
+EMAIL_TO = "abrahammichan@procesadores.net, ruben@procesadores.net"
+
+# 1) Ejecutar el scraper (usa la función main() que definimos arriba)
+df = main()   # Esto genera cyberpuerta_datos.csv y cyberpuerta_datos.xlsx (solo de esta parte)
+
+# 2) Enviar los archivos por correo
+enviar_resultados_por_mail(
+    sender=EMAIL_SENDER,
+    password=EMAIL_PASSWORD,
+    recipient=EMAIL_TO,
+    archivos_adjuntos=["cyberpuerta_datos.csv", "cyberpuerta_datos.xlsx"],
+)
