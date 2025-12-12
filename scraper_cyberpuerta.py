@@ -1,7 +1,3 @@
-# -*- coding: utf-8 -*-
-"""ejecucuion cyberpuerta git hub MOD TIEMPO 5h40 + PENDIENTES"""
-
-!pip -q install "requests==2.32.4" "beautifulsoup4==4.12.3" "lxml==5.2.2" "xlsxwriter==3.2.0" pandas
 
 import os
 import re, time, random, sys, statistics
