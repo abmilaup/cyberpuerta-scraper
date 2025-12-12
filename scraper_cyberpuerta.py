@@ -115,7 +115,7 @@ KC-U2G64-5R
 KF432S20IBK2/32
 KF548S38IB-16
 DTXM/256GB
- UC310-128G-RBK
+UC310-128G-RBK
 100-100000591WOF
 KC-S44480-7S
 KF556C40BB-32
@@ -174,7 +174,7 @@ AUV250-32G-RBK
 SLEG-900-2TCS
 KC-U2L64-7LG
 AP20000QCD-DGT-CRD
- SC740-1000G-CBU
+SC740-1000G-CBU
 SDR2V6/256GB
 ASU800SS-1TT-C
 MIC-KF8-00001
@@ -237,15 +237,14 @@ INPUT_URLS = [
 BASE_SEARCH = "https://www.cyberpuerta.mx/index.php?cl=search&searchparam="
 
 # --- Control de tiempos (por SKU, como en tu script de Colab) ---
-INITIAL_WAIT_RANGE = (50.0, 80.0)   # espera mínima obligatoria ANTES de la búsqueda por SKU
-BETWEEN_REQUESTS    = (4.0, 7.0)    # espera entre búsqueda y detalle
-MAX_RETRIES         = 7             # reintentos por petición (para 429/403/5xx)
-BACKOFF_BASE        = 4.0           # base para backoff exponencial en 429/403
-BACKOFF_CAP         = 90.0          # tope de cada backoff
+INITIAL_WAIT_RANGE = (50.0, 80.0)
+BETWEEN_REQUESTS    = (4.0, 7.0)
+MAX_RETRIES         = 7
+BACKOFF_BASE        = 4.0
+BACKOFF_CAP         = 90.0
 
-# Adaptador de espera según “salud” reciente (cuántos 429 hemos visto)
-ROLLING_WINDOW      = 6             # últimos N SKUs para medir ratio de 429
-ALPHA_SENSITIVITY   = 1.2           # cuánto aumentar/bajar la espera inicial por ratio de 429
+ROLLING_WINDOW      = 6
+ALPHA_SENSITIVITY   = 1.2
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -253,15 +252,12 @@ UA = (
 )
 
 # ========= CONFIG GLOBAL DE TIEMPO / LOOPS PARA GITHUB ==============
-# Máximo de horas que puede durar UNA ejecución de GitHub
-# 5.667 ≈ 5 horas 40 minutos
 MAX_TOTAL_HOURS = float(os.environ.get("CYBERPUERTA_MAX_HOURS", "0.07"))
-
-# Minutos de colchón antes del límite (para terminar bien, generar Excel y pendientes) 10MIN
 TIME_GUARD_MINUTES = float(os.environ.get("CYBERPUERTA_GUARD_MINUTES", "1"))
 
-# Índice de loop (1, 2 o 3) – lo pones en el workflow de GitHub
-LOOP_INDEX = int(os.environ.get("CYBERPUERTA_LOOP_INDEX", "1"))
+# 🔴 AQUÍ ESTABA EL BUG: antes leías CYBERPUERTA_LOOP_INDEX, pero en el YAML mandas LOOP_INDEX
+# Soportamos ambos nombres por si acaso.
+LOOP_INDEX = int(os.environ.get("LOOP_INDEX", os.environ.get("CYBERPUERTA_LOOP_INDEX", "1")))
 if LOOP_INDEX < 1:
     LOOP_INDEX = 1
 if LOOP_INDEX > 3:
@@ -296,7 +292,7 @@ def jitter(a, b):
 def sleep_range(a, b):
     t = jitter(a, b)
     time.sleep(t)
-    return t  # devolvemos lo que realmente durmió para log
+    return t
 
 
 def to_number(txt):
@@ -329,7 +325,6 @@ def parse_first_product_url_from_search(html, current_url):
         a = soup.select_one(sel)
         if a and a.get("href"):
             return urljoin(current_url, a["href"])
-    # fallback muy genérico
     for a in soup.select("a[href]"):
         href = a.get("href", "")
         if href.endswith(".html"):
@@ -339,12 +334,11 @@ def parse_first_product_url_from_search(html, current_url):
 
 def extract_all_from_product(html):
     soup = BeautifulSoup(html, "lxml")
-    # Título
     title = ""
     h1 = soup.select_one("h1.detailsInfo_right_title") or soup.find("h1")
     if h1:
         title = h1.get_text(strip=True)
-    # Precio
+
     price_text = ""
     meta_price = soup.select_one('meta[itemprop="price"][content]')
     if meta_price:
@@ -360,7 +354,6 @@ def extract_all_from_product(html):
             price_text = m.group(0)
     price_num = to_number(price_text)
 
-    # Stock
     stock_text, stock_num = "", None
     s1 = soup.select_one("div.stock span.stockFlag span")
     if s1:
@@ -390,8 +383,7 @@ def extract_all_from_product(html):
     return title, (price_text or ""), price_num, (stock_text or ""), (stock_num if stock_num is not None else "")
 
 
-# ====== Registro de 429 recientes para adaptar la espera inicial ======
-recent_429 = []  # lista de bool (True si el SKU tuvo al menos un 429 en su ciclo)
+recent_429 = []
 
 
 def current_429_ratio():
@@ -401,19 +393,14 @@ def current_429_ratio():
 
 
 def planned_initial_wait():
-    base = jitter(*INITIAL_WAIT_RANGE)  # siempre >= 50s
-    ratio = current_429_ratio()         # 0..1
+    base = jitter(*INITIAL_WAIT_RANGE)
+    ratio = current_429_ratio()
     multiplier = 1.0 + ALPHA_SENSITIVITY * ratio
     planned = base * multiplier
     return planned
 
 
 def get_with_backoff(url, allow_redirects=True, timeout=30, mark_429_flag=None):
-    """
-    GET con manejo 429/403:
-    - backoff exponencial desde BACKOFF_BASE, con tope BACKOFF_CAP, + jitter.
-    - marca en mark_429_flag[0] = True si aparece algún 429.
-    """
     last_status = None
     for i in range(MAX_RETRIES):
         try:
@@ -436,7 +423,6 @@ def get_with_backoff(url, allow_redirects=True, timeout=30, mark_429_flag=None):
     return None
 
 
-# ================ Helpers de salida en consola (TAB para Excel) ================
 COLUMNS = ["TIMESTAMP", "SKU", "URL_BUSQUEDA", "URL_PRODUCTO", "TITULO",
            "PRECIO_TEXTO", "PRECIO_NUM", "STOCK_TEXTO", "STOCK_NUM", "STATUS"]
 
@@ -458,7 +444,7 @@ def print_header_once():
 # ================= Carga de códigos por LOOP =======================
 def load_codes_for_loop(loop_index: int):
     """
-    LOOP 1: lee de INPUT_CODES (embebido o desde archivo si quieres extender)
+    LOOP 1: lee de INPUT_CODES
     LOOP 2: lee de 'cyberpuerta_pending_codes_loop1.txt'
     LOOP 3: lee de 'cyberpuerta_pending_codes_loop2.txt'
     """
@@ -479,7 +465,6 @@ def load_codes_for_loop(loop_index: int):
         return []
 
 
-# ========================= Flujo por código / URL =========================
 def process_code(code):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sku = code
@@ -492,14 +477,12 @@ def process_code(code):
     s_txt = ""
     s_num = ""
 
-    saw_429 = [False]  # se pasa por referencia
+    saw_429 = [False]
 
-    # 1) Espera inicial ADAPTATIVA (nunca < 50s)
     initial_wait = planned_initial_wait()
     print(f"   ⏳ Espera inicial antes de buscar '{sku}': {initial_wait:.1f}s (ratio 429 reciente: {current_429_ratio():.2f})")
     time.sleep(initial_wait)
 
-    # 2) Búsqueda
     r = get_with_backoff(url_search, mark_429_flag=saw_429)
     if not r:
         return {
@@ -524,7 +507,6 @@ def process_code(code):
         }
 
     url_prod = first
-    # 3) Detalle
     r2 = get_with_backoff(url_prod, mark_429_flag=saw_429)
     if not r2 or r2.status_code == 404:
         return {
@@ -535,7 +517,6 @@ def process_code(code):
 
     title, p_txt, p_num, s_txt, s_num = extract_all_from_product(r2.text)
 
-    # 4) Registrar si hubo 429 en este SKU (para adaptar el próximo)
     recent_429.append(bool(saw_429[0]))
     if len(recent_429) > ROLLING_WINDOW:
         recent_429.pop(0)
@@ -613,7 +594,6 @@ def process_url(url):
     }
 
 
-# =============================== Main ===============================
 def main(loop_index: int = 1):
     codes = load_codes_for_loop(loop_index)
     urls = [u.strip() for u in INPUT_URLS if u.strip()]
@@ -632,7 +612,6 @@ def main(loop_index: int = 1):
     stopped_by_time = False
 
     for i, (kind, payload) in enumerate(items, 1):
-        # Checar límite de tiempo ANTES de procesar el siguiente ítem
         if limit_seconds is not None:
             elapsed = time.time() - start_time
             if elapsed >= max(0.0, limit_seconds - guard_seconds):
@@ -641,7 +620,7 @@ def main(loop_index: int = 1):
                     f"⏹️ Se alcanzó el límite de tiempo de {MAX_TOTAL_HOURS:.2f} horas.\n"
                     f"   Se detiene en el ítem {i}/{total}. Lo que falta se guardará como pendientes."
                 )
-                pending_items = items[i-1:]  # desde el actual hasta el final
+                pending_items = items[i-1:]
                 stopped_by_time = True
                 break
 
@@ -670,13 +649,11 @@ def main(loop_index: int = 1):
             print(row_to_tsv(row))
             sys.stdout.flush()
 
-    # Si NO se paró por tiempo, no hay pendientes
     if not stopped_by_time:
         pending_items = []
 
     pending_codes = [p for (k, p) in pending_items if k == "code"]
 
-    # Exporta CSV/XLSX de este loop
     df = pd.DataFrame(results, columns=COLUMNS)
     csv_name = f"cyberpuerta_datos_loop{loop_index}.csv"
     xlsx_name = f"cyberpuerta_datos_loop{loop_index}.xlsx"
@@ -694,7 +671,6 @@ def main(loop_index: int = 1):
 
     print(f"\n✅ LOOP {loop_index}: '{csv_name}' y '{xlsx_name}' generados.")
 
-    # Guardar pendientes SOLO si loop_index < 3
     if pending_codes and loop_index < 3:
         pending_file = f"cyberpuerta_pending_codes_loop{loop_index}.txt"
         with open(pending_file, "w", encoding="utf-8") as f:
@@ -705,7 +681,6 @@ def main(loop_index: int = 1):
             f"   Se guardaron en '{pending_file}' para el siguiente loop."
         )
     elif pending_codes and loop_index >= 3:
-        # Ya no habrá más loops automáticos – opcionalmente guardamos para referencia
         pending_file = f"cyberpuerta_pending_codes_loop{loop_index}.txt"
         with open(pending_file, "w", encoding="utf-8") as f:
             for code in pending_codes:
@@ -720,16 +695,12 @@ def main(loop_index: int = 1):
     return df, csv_name, xlsx_name
 
 
-# ======================= EMAIL (igual a tu versión) =======================
 def enviar_resultados_por_mail(
     sender: str,
     password: str,
     recipient: str,
     archivos_adjuntos=None
 ):
-    """
-    Envía un correo con los archivos adjuntos generados por el scraper.
-    """
     if archivos_adjuntos is None:
         archivos_adjuntos = []
 
@@ -767,12 +738,10 @@ def enviar_resultados_por_mail(
     print("✅ Correo enviado correctamente.")
 
 
-# ======================= PUNTO DE ENTRADA =======================
 if __name__ == "__main__":
     print(f"🔁 Iniciando scraper – LOOP_INDEX = {LOOP_INDEX}")
     df, csv_name, xlsx_name = main(loop_index=LOOP_INDEX)
 
-    # Leer credenciales de entorno (NO hard-codear en GitHub)
     EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
     EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
     EMAIL_TO = os.environ.get("EMAIL_TO")
