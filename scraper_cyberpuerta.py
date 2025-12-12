@@ -252,8 +252,8 @@ UA = (
 )
 
 # ========= CONFIG GLOBAL DE TIEMPO / LOOPS PARA GITHUB ==============
-MAX_TOTAL_HOURS = float(os.environ.get("CYBERPUERTA_MAX_HOURS", "0.07"))
-TIME_GUARD_MINUTES = float(os.environ.get("CYBERPUERTA_GUARD_MINUTES", "1"))
+MAX_TOTAL_HOURS = float(os.environ.get("CYBERPUERTA_MAX_HOURS", "5.667"))
+TIME_GUARD_MINUTES = float(os.environ.get("CYBERPUERTA_GUARD_MINUTES", "10"))
 
 # 🔴 AQUÍ ESTABA EL BUG: antes leías CYBERPUERTA_LOOP_INDEX, pero en el YAML mandas LOOP_INDEX
 # Soportamos ambos nombres por si acaso.
