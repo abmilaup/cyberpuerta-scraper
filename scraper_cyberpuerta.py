@@ -327,26 +327,41 @@ def search_code_in_cyberpuerta(code: str):
     """
     Busca el código en Cyberpuerta y devuelve:
     (url_busqueda, url_producto, status_text)
+
+    Estrategia:
+    1) Hacer la búsqueda normal.
+    2) Buscar el primer <a> cuya href contenga el SKU.
+    3) Si no se encuentra, usar los selectores antiguos como respaldo.
     """
     search_url = BASE_SEARCH + quote_plus(code)
     html = fetch_url(search_url)
     soup = BeautifulSoup(html, "lxml")
 
-    # Intentamos agarrar el primer enlace de producto razonable
-    link = (
-        soup.select_one("a.product-link")
-        or soup.select_one("a[href*='/articulo/']")
-        or soup.select_one("a[href*='Producto']")
-    )
+    link = None
+
+    # 1) Intento principal: cualquier <a> cuyo href contenga el SKU
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if code.lower() in href.lower():
+            link = a
+            break
+
+    # 2) Fallback: los selectores antiguos
+    if not link:
+        link = (
+            soup.select_one("a.product-link")
+            or soup.select_one("a[href*='/articulo/']")
+            or soup.select_one("a[href*='Producto']")
+        )
 
     if not link:
+        # No se encontró ningún enlace de producto
         return search_url, "", "Sin resultados en búsqueda"
 
     href = link.get("href", "")
     product_url = urljoin(BASE_URL, href)
 
     return search_url, product_url, "Encontrado en búsqueda"
-
 
 # ============================================================
 # PROCESAMIENTO DE CÓDIGOS / URLS
