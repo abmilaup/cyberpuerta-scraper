@@ -257,8 +257,8 @@ UA = (
 # 5.667 ≈ 5 horas 40 minutos
 MAX_TOTAL_HOURS = float(os.environ.get("CYBERPUERTA_MAX_HOURS", "0.07"))
 
-# Minutos de colchón antes del límite (para terminar bien, generar Excel y pendientes)
-TIME_GUARD_MINUTES = float(os.environ.get("CYBERPUERTA_GUARD_MINUTES", "10"))
+# Minutos de colchón antes del límite (para terminar bien, generar Excel y pendientes) 10MIN
+TIME_GUARD_MINUTES = float(os.environ.get("CYBERPUERTA_GUARD_MINUTES", "1"))
 
 # Índice de loop (1, 2 o 3) – lo pones en el workflow de GitHub
 LOOP_INDEX = int(os.environ.get("CYBERPUERTA_LOOP_INDEX", "1"))
