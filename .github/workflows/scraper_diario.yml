@@ -31,7 +31,7 @@ jobs:
         env:
           LOOP_INDEX: "1"
 
-          CYBERPUERTA_MAX_HOURS: "5.667"
+          CYBERPUERTA_MAX_HOURS: "4.3333"
           CYBERPUERTA_GUARD_MINUTES: "10"
 
           # Para producción:
