@@ -2,8 +2,8 @@ name: Scraper diario Cyberpuerta
 
 on:
   schedule:
-    # Corre todos los días a las 02:00 UTC
-    - cron: '0 2 * * *'
+    # 03:00 UTC = 21:00 (9 pm) CDMX (UTC-6)
+    - cron: '0 3 * * *'
   workflow_dispatch:
 
 jobs:
@@ -25,77 +25,20 @@ jobs:
           pip install -r requirements.txt
 
       # ========================
-      # LOOP 1
+      # ÚNICO LOOP (LOOP 1)
       # ========================
-      - name: Run Cyberpuerta scraper – LOOP 1
+      - name: Run Cyberpuerta scraper – SOLO LOOP 1
         env:
-          LOOP_INDEX: "1"
+          # El script usará este valor para LOOP_INDEX
+          CYBERPUERTA_LOOP_INDEX: "1"
 
-          CYBERPUERTA_MAX_HOURS: "5.667"
+          # Tiempo máximo POR EJECUCIÓN (en horas) → 5h40 aprox
+          CYBERPUERTA_MAX_HOURS: "5.67"
+          # Minutos de colchón antes de cortar (en minutos)
           CYBERPUERTA_GUARD_MINUTES: "10"
 
-          # Para producción:
-          # CYBERPUERTA_MAX_HOURS: "5.667"
-          # CYBERPUERTA_GUARD_MINUTES: "10"
-
-          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          # NO mandamos EMAIL_SENDER / EMAIL_PASSWORD / EMAIL_TO
+          # para que el .py NO envíe correos ni adjuntos
         run: |
-          echo "==== INICIANDO LOOP 1 ===="
+          echo "==== INICIANDO ÚNICO LOOP (1) ===="
           python scraper_cyberpuerta.py
-
-      # ========================
-      # LOOP 2 (solo si hay pendientes del loop 1)
-      # ========================
-      - name: Run Cyberpuerta scraper – LOOP 2 (si hay pendientes)
-        env:
-          LOOP_INDEX: "2"
-
-          CYBERPUERTA_MAX_HOURS: "5.667"
-          CYBERPUERTA_GUARD_MINUTES: "10"
-
-          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: |
-          if [ -f "cyberpuerta_pending_codes_loop1.txt" ]; then
-            echo "==== Hay pendientes del LOOP 1, arrancando LOOP 2... ===="
-            python scraper_cyberpuerta.py
-          else
-            echo "==== No hay pendientes del LOOP 1, NO se corre LOOP 2. ===="
-          fi
-
-      # ========================
-      # LOOP 3 (solo si hay pendientes del loop 2)
-      # ========================
-      - name: Run Cyberpuerta scraper – LOOP 3 (si hay pendientes)
-        env:
-          LOOP_INDEX: "3"
-
-          CYBERPUERTA_MAX_HOURS: "5.667"
-          CYBERPUERTA_GUARD_MINUTES: "10"
-
-          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: |
-          if [ -f "cyberpuerta_pending_codes_loop2.txt" ]; then
-            echo "==== Hay pendientes del LOOP 2, arrancando LOOP 3... ===="
-            python scraper_cyberpuerta.py
-          else
-            echo "==== No hay pendientes del LOOP 2, NO se corre LOOP 3. ===="
-          fi
-
-      # ========================
-      # SUBIR ARCHIVOS
-      # ========================
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: resultados-cyberpuerta
-          path: |
-            cyberpuerta_datos_loop*.csv
-            cyberpuerta_datos_loop*.xlsx
-            cyberpuerta_pending_codes_loop*.txt
-          if-no-files-found: warn
