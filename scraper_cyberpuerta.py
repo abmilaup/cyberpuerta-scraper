@@ -517,8 +517,8 @@ def main(loop_index: int = 1):
     pending_codes = [p for (k, p) in pending_items if k == "code"]
 
     df = pd.DataFrame(results, columns=COLUMNS)
-    csv_name = f"cyberpuerta_datos_loop{loop_index}.csv"
-    xlsx_name = f"cyberpuerta_datos_loop{loop_index}.xlsx"
+    csv_name = f"cyberpuerta_PART1_datos_loop{loop_index}.csv"
+    xlsx_name = f"cyberpuerta_PART1_datos_loop{loop_index}.xlsx"
 
     df.to_csv(csv_name, index=False, encoding="utf-8-sig")
     with pd.ExcelWriter(xlsx_name, engine="xlsxwriter") as writer:
@@ -567,7 +567,7 @@ def enviar_resultados_por_mail(
         archivos_adjuntos = []
 
     msg = EmailMessage()
-    msg["Subject"] = "Resultados scraper Cyberpuerta"
+    msg["Subject"] = "Resultados scraper Cyberpuerta PARTE 1"
     msg["From"] = sender
     msg["To"] = recipient
 
